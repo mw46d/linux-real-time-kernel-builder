@@ -36,7 +36,7 @@
 # copy deb packages to the host, or directly to the RPI4 target
 # $ scp ../*.deb <user>@172.17.0.1:/home/<user>/.
 
-FROM ubuntu:focal
+FROM ubuntu:jammy
 
 USER root
 ARG DEBIAN_FRONTEND=noninteractive
@@ -99,14 +99,9 @@ RUN if test -z $UNAME_R; then UNAME_R=`curl -s http://ports.ubuntu.com/pool/main
 RUN mkdir /home/user/linux_build \
     && cd /home/user/linux_build \
     && git config --global https.postBuffer 1048576000 \
-    && time git clone -b master --depth 1 --single-branch https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/${UBUNTU_VERSION} ${KERNEL_DIR} \
-    && cd ${KERNEL_DIR} \
-    && git fetch --tag
-
-# checkout necessary tag
-RUN cd /home/user/linux_build/${KERNEL_DIR} \
-    && git tag -l *`cat /home/user/uname_r | cut -d '-' -f 2`* | sort -V | tail -1 > /home/user/linux_build/tag \
-    && git checkout `cat /home/user/linux_build/tag`
+    && git ls-remote --tags https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/${UBUNTU_VERSION} *$(cat /home/user/uname_r | cut -d '-' -f 2)*  | awk -F '/' '!/[ ^]/ { print $3; }' | sort -V | tail -1 > /home/user/linux_build/tag \
+    && time git clone --branch $(cat /home/user/linux_build/tag) --depth 1 --single-branch https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/${UBUNTU_VERSION} ${KERNEL_DIR} \
+    && cd ${KERNEL_DIR}
 
 # install buildinfo to retieve `raspi` kernel config
 RUN cd /home/user \
@@ -115,7 +110,7 @@ RUN cd /home/user \
 
 # install lttng dependencies
 RUN sudo apt-get update \
-    && sudo apt-get install -y libuuid1 libpopt0 liburcu6 libxml2 numactl
+    && sudo apt-get install -y libuuid1 libpopt0 liburcu8 libxml2 numactl
 
 COPY ./getpatch.sh /home/user/
 
@@ -141,7 +136,10 @@ RUN set -x \
     && ./scripts/built-in.sh ${HOME}/linux_build/${KERNEL_DIR}
 
 # patch kernel, do not fail if some patches are skipped
+# MARCO The patch for kernel/time/tick-sched.c seems to have a problem?!
 RUN cd /home/user/linux_build/${KERNEL_DIR} \
+    && mv ../patch-`cat $HOME/rt_patch`.patch ../mw.p1 \
+    && sed '/@@ -1045,7 +1045,7 @@ static bool report_idle_softirq(void)/,+8d' < ../mw.p1 > ../patch-`cat $HOME/rt_patch`.patch \
     && OUT="$(patch -p1 --forward < ../patch-`cat $HOME/rt_patch`.patch)" || echo "${OUT}" | grep "Skipping patch" -q || (echo "$OUT" && false);
 
 # setup build environment
@@ -155,8 +153,11 @@ COPY ./.config-fragment /home/user/linux_build/.
 
 # config RT kernel and merge config fragment
 RUN cd /home/user/linux_build/${KERNEL_DIR} \
+    && ls -R /home/user/usr/ \
     && cp /home/user/usr/lib/linux/`cat /home/user/uname_r`/config .config \
     && ARCH=${ARCH} CROSS_COMPILE=${triple}- ./scripts/kconfig/merge_config.sh .config $HOME/linux_build/.config-fragment
 
 RUN cd /home/user/linux_build/${KERNEL_DIR} \
-    && fakeroot debian/rules clean
+    && fakeroot debian/rules clean \
+    && cp -rp debian debian.mw \
+    && sed -i '/rm -rf debian/d;s/mkdir debian/mkdir -p debian/' scripts/package/mkdebian
